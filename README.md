@@ -1,2 +1,8 @@
-# mobility-limitation-life-course
-Code and supplementary materials for life-course analysis of conditions associated with mobility limitation using Global Burden of Disease estimates and U.S. health care spending.
+# Mobility Limitation Across the Life Course
+
+This repository contains the code used in the study:
+
+**Burden of Health Conditions Associated With Mobility Limitation Across the Life Course in the United States**
+
+## Repository structure
+
