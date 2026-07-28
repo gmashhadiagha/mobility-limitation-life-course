@@ -1,0 +1,231 @@
+import pandas as pd
+from pathlib import Path
+
+# -------------------------------
+# Helpers
+# -------------------------------
+def clean_colname(x) -> str:
+    """Make one column name safe: remove NBSP, collapse whitespace, strip."""
+    s = str(x).replace("\u00A0", " ")
+    s = " ".join(s.split())
+    return s.strip()
+
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean columns even if columns are MultiIndex (from pivot)."""
+    if isinstance(df.columns, pd.MultiIndex):
+        new_levels = []
+        for lvl in df.columns.levels:
+            new_levels.append(pd.Index([clean_colname(v) for v in lvl]))
+        df.columns = df.columns.set_levels(new_levels)
+    else:
+        df.columns = pd.Index([clean_colname(c) for c in df.columns])
+    return df
+
+def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten MultiIndex columns to single strings."""
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            "_".join([str(c) for c in col if str(c) != ""]).strip("_")
+            for col in df.columns
+        ]
+    else:
+        df.columns = [str(c) for c in df.columns]
+    return df
+
+
+# -------------------------------
+# 0) Paths
+# -------------------------------
+data_dir = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2")
+output_file = data_dir / "GBD_2019_2023_SelectedBy2019YLD_WithCostIfAvailable.xlsx"
+
+# -------------------------------
+# 1) Load and clean all GBD CSVs
+# -------------------------------
+csv_files = list(data_dir.glob("*.csv"))
+df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+df = clean_columns(df)
+
+# (Optional) restrict to USA + Both sex if these exist
+if "location_name" in df.columns:
+    df = df[df["location_name"] == "United States of America"]
+if "sex_name" in df.columns:
+    df = df[df["sex_name"] == "Both"]
+
+# -------------------------------
+# 2) Keep only years 2019 & 2023 and relevant measures
+# -------------------------------
+df = df[df["year"].isin([2019, 2023])].copy()
+
+df = df[df["measure_name"].isin([
+    "Prevalence",
+    "YLDs (Years Lived with Disability)"
+])].copy()
+
+# -------------------------------
+# 3) Pivot: measures/metrics -> columns (keep year)
+# -------------------------------
+pivot_df = (
+    df.pivot_table(
+        index=["year", "age_id", "age_name", "cause_id", "cause_name"],
+        columns=["measure_name", "metric_name"],
+        values="val",
+        aggfunc="median"   # handles duplicates safely
+    )
+    .reset_index()
+)
+
+pivot_df = clean_columns(pivot_df)
+pivot_df = flatten_columns(pivot_df)
+pivot_df = clean_columns(pivot_df)
+
+# Rename to short, consistent names
+pivot_df = pivot_df.rename(columns={
+    "Prevalence_Number": "prevalence_number",
+    "Prevalence_Rate": "prevalence_rate",
+    "YLDs (Years Lived with Disability)_Number": "ylds_number",
+    "YLDs (Years Lived with Disability)_Rate": "ylds_rate",
+})
+pivot_df = clean_columns(pivot_df)
+
+# -------------------------------
+# 4) Selection rule (based ONLY on 2019 YLD)
+# -------------------------------
+YLD_KEY = "ylds_number"  # or "ylds_rate" if you prefer
+
+if YLD_KEY not in pivot_df.columns:
+    raise ValueError(f"Missing '{YLD_KEY}'. Available columns:\n{pivot_df.columns.tolist()}")
+
+df2019 = pivot_df[pivot_df["year"] == 2019].copy()
+
+age_median_2019 = (
+    df2019.groupby(["age_id", "age_name"], as_index=False)[YLD_KEY]
+    .median()
+    .rename(columns={YLD_KEY: "yld_age_median_2019"})
+)
+
+df2019_med = df2019.merge(age_median_2019, on=["age_id", "age_name"], how="left")
+
+# Condition: above-median YLD in 2019
+mask = df2019_med[YLD_KEY].notna() & (df2019_med[YLD_KEY] > df2019_med["yld_age_median_2019"])
+
+# Build list of columns we want in SELECTED_CAUSES
+detail_cols = ["age_id", "age_name", "cause_id", "cause_name"]
+
+# Add prevalence & YLD columns *if they exist* in df2019_med
+for extra in ["prevalence_number", "prevalence_rate",
+              "ylds_number", "ylds_rate",
+              "yld_age_median_2019"]:
+    if extra in df2019_med.columns:
+        detail_cols.append(extra)
+
+# This is what will be written to the SELECTED_CAUSES sheet
+selected_causes = df2019_med.loc[mask, detail_cols].drop_duplicates()
+
+
+# -------------------------------
+# 5) Pivot years -> side-by-side columns for prev & YLD
+# -------------------------------
+wide_df = (
+    filtered_df.pivot_table(
+        index=["age_id", "age_name", "cause_id", "cause_name"],
+        columns="year",
+        values=["prevalence_number", "prevalence_rate", "ylds_number", "ylds_rate"],
+        aggfunc="first"
+    )
+    .reset_index()
+)
+
+wide_df = clean_columns(wide_df)
+wide_df = flatten_columns(wide_df)
+wide_df = clean_columns(wide_df)
+
+# -------------------------------
+# 5B) OPTIONAL: merge COST if spending file exists
+# -------------------------------
+cost_file = data_dir / "IHME_US_Health_Spending_Condition_2019_2023.csv"  # <-- change later
+
+if cost_file.exists():
+    cost_df = pd.read_csv(cost_file)
+    cost_df = clean_columns(cost_df)
+
+    # Restrict to USA + Both sex if present
+    if "location_name" in cost_df.columns:
+        cost_df = cost_df[cost_df["location_name"] == "United States of America"]
+    if "sex_name" in cost_df.columns:
+        cost_df = cost_df[cost_df["sex_name"] == "Both"]
+
+    # Keep only 2019 & 2023
+    cost_df = cost_df[cost_df["year"].isin([2019, 2023])].copy()
+
+    # If measure_name column exists and contains "Spending", filter to it
+    if "measure_name" in cost_df.columns:
+        uniq_meas = cost_df["measure_name"].unique()
+        if "Spending" in uniq_meas:
+            cost_df = cost_df[cost_df["measure_name"] == "Spending"].copy()
+
+    # Pivot cost: val = cost
+    cost_pivot = (
+        cost_df.pivot_table(
+            index=["age_id", "age_name", "cause_id", "cause_name"],
+            columns="year",
+            values="val",
+            aggfunc="median"
+        )
+        .reset_index()
+    )
+
+    cost_pivot = flatten_columns(cost_pivot)
+    cost_pivot = clean_columns(cost_pivot)
+
+    # Rename val_2019 -> cost_2019, val_2023 -> cost_2023
+    rename_map = {}
+    for yr in [2019, 2023]:
+        col = f"val_{yr}"
+        if col in cost_pivot.columns:
+            rename_map[col] = f"cost_{yr}"
+    cost_pivot = cost_pivot.rename(columns=rename_map)
+
+    # Merge cost into main table
+    wide_df = wide_df.merge(
+        cost_pivot,
+        on=["age_id", "age_name", "cause_id", "cause_name"],
+        how="left"
+    )
+
+    print(f"Cost file found and merged: {cost_file}")
+else:
+    print(f"⚠️ Cost file not found at: {cost_file}")
+    print("   Continuing without cost columns. You can rerun after you download the spending file.")
+
+# -------------------------------
+# 6) Export to Excel: one sheet per age group
+# -------------------------------
+with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
+
+    for agename, age_df in wide_df.groupby("age_name"):
+        sheet_name = agename.replace("<", "lt").replace(">", "gt").replace("/", "_")[:31]
+
+        cols_out = [
+            "cause_id",
+            "cause_name",
+            "prevalence_number_2019", "prevalence_number_2023",
+            "prevalence_rate_2019", "prevalence_rate_2023",
+            "ylds_number_2019", "ylds_number_2023",
+            "ylds_rate_2019", "ylds_rate_2023",
+            "cost_2019", "cost_2023",    # will only be present if cost file existed
+        ]
+        cols_out = [c for c in cols_out if c in age_df.columns]
+
+        sort_col = "prevalence_number_2019" if "prevalence_number_2019" in cols_out else cols_out[0]
+
+        age_df[cols_out] \
+            .sort_values(sort_col, ascending=False) \
+            .to_excel(writer, sheet_name=sheet_name, index=False)
+
+    # Helper sheets
+    age_median_2019.to_excel(writer, sheet_name="AGE_MEDIAN_2019", index=False)
+    selected_causes.to_excel(writer, sheet_name="SELECTED_CAUSES", index=False)
+
+print("DONE ✔ Excel created:")
+print(output_file)
