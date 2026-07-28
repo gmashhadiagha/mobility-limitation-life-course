@@ -1,0 +1,1925 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[3]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# ================================
+# 1. PATH TO YOUR FOLDER
+# ================================
+folder = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+# ================================
+# 2. READ ONLY SHEET "PAYER_ALL_PAYERS"
+#    FROM ALL XLSX FILES
+# ================================
+all_data = []
+
+for file in folder.glob("*.xlsx"):
+    try:
+        df = pd.read_excel(file, sheet_name="PAYER_ALL_PAYERS")
+    except ValueError:
+        # file doesn't have that sheet – skip it
+        print(f"Sheet 'PAYER_ALL_PAYERS' not found in {file.name}, skipping")
+        continue
+
+    df.columns = [c.strip() for c in df.columns]  # clean col names
+    df["source_file"] = file.name
+    all_data.append(df)
+
+# Combine all files
+df_all = pd.concat(all_data, ignore_index=True)
+
+# ================================
+# 3. OPTIONAL FILTERS / SORT
+# ================================
+
+# drop rows without sex_name
+if "sex_name" in df_all.columns:
+    df_all = df_all[df_all["sex_name"].notna()]
+
+# sort by sex, age, disease if those columns exist
+sort_cols = [c for c in ["sex_name", "age_id", "age_name", "cause_name"] if c in df_all.columns]
+if sort_cols:
+    df_all = df_all.sort_values(by=sort_cols)
+
+# ================================
+# 4. WRITE NEW EXCEL:
+#    ONE SHEET PER SEX (Male/Female/All)
+#    WITH ALL COST COLUMNS
+# ================================
+output_path = folder / "ALL_PAYERS_BY_SEX_ALL_DISEASES.xlsx"
+
+with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+    for sex in df_all["sex_name"].unique():
+        temp = df_all[df_all["sex_name"] == sex].copy()
+        if sort_cols:
+            temp = temp.sort_values(by=[c for c in ["age_id", "age_name", "cause_name"] if c in temp.columns])
+
+        # safe sheet name
+        if pd.isna(sex):
+            sheet_name = "Unknown_Sex"
+        else:
+            sheet_name = str(sex).replace(" ", "_")[:140]
+
+        # THIS WRITES ALL COLUMNS, INCLUDING ALL spend_* COST COLUMNS
+        temp.to_excel(writer, sheet_name=sheet_name, index=False)
+
+print("DONE! Saved to:", output_path)
+
+
+# In[5]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# ================================
+# 1. Load your combined file
+# ================================
+input_file = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers\ALL_PAYERS_BY_SEX_ALL_DISEASES.xlsx")
+
+df = pd.read_excel(input_file, sheet_name=None)
+
+# Combine Male / Female / All sheets into one dataframe
+df_all = pd.concat(df.values(), ignore_index=True)
+
+df_all.columns = [c.strip() for c in df_all.columns]
+
+# ================================
+# 2. Keep ONLY Both Sexes
+# ================================
+both_mask = df_all["sex_name"].isin(["All", "Both", "Both sexes"])
+df_both = df_all[both_mask].copy()
+
+# ================================
+# 3. Order Ages
+# ================================
+if "age_id" in df_both.columns:
+    age_order = (df_both.sort_values("age_id")["age_name"]
+                 .drop_duplicates())
+else:
+    age_order = df_both["age_name"].drop_duplicates().sort_values()
+
+# ================================
+# 4. Export: One Sheet Per Age
+# ================================
+output_file = input_file.parent / "BOTH_SEX__ONE_SHEET_PER_AGE.xlsx"
+
+with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
+    for age in age_order:
+        temp = df_both[df_both["age_name"] == age].copy()
+
+        if "cause_name" in temp.columns:
+            temp = temp.sort_values("cause_name")
+
+        # safe Excel sheet name
+        sheet_name = str(age)
+        for bad in [":", "/", "\\", "?", "*", "[", "]"]:
+            sheet_name = sheet_name.replace(bad, "-")
+        sheet_name = sheet_name[:31]
+
+        temp.to_excel(writer, sheet_name=sheet_name, index=False)
+
+print("DONE! Saved to:")
+print(output_file)
+
+
+# In[11]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# -----------------------------
+# 1. Paths
+# -----------------------------
+input_dir = Path(r"C:\Users\gmash\Downloads")
+output_dir = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+# pattern for your 4 PVD payer files
+pattern = "IHME_USA_HEALTH_CARE_SPENDING_CAUSE_COUNTY_2010_2019_NEURO_EPILEPSY*2019*.CSV"
+
+# -----------------------------
+# 2. Read and concatenate all 4 payers
+# -----------------------------
+all_dfs = []
+
+for f in input_dir.glob(pattern):
+    print("Reading:", f.name)
+    df = pd.read_csv(f)
+
+    # keep only 2019, national, United States
+    df = df[
+        (df["year_id"] == 2019) &
+        (df["geo"] == "national") &
+        (df["location_name"] == "United States")
+    ]
+
+    # we only need age, sex, and spending
+    all_dfs.append(
+        df[["age_group_years_start", "age_name", "sex_id", "sex_name", "spend_mean"]]
+    )
+
+# combine all payers into one dataframe
+df_all = pd.concat(all_dfs, ignore_index=True)
+
+# -----------------------------
+# 3. Aggregate across ALL payers & ALL TOC
+# -----------------------------
+# group by age and sex; spend_mean summed over payers and toc
+grouped = (
+    df_all
+    .groupby(["age_group_years_start", "age_name", "sex_id", "sex_name"], as_index=False)["spend_mean"]
+    .sum()
+)
+
+# -----------------------------
+# 4. Build Male, Female, Both tables
+# -----------------------------
+# Male
+male = (
+    grouped[grouped["sex_id"] == 1]
+    [["age_group_years_start", "age_name", "spend_mean"]]
+    .rename(columns={"spend_mean": "PVD_spend_all_payers"})
+    .sort_values("age_group_years_start")
+)
+
+# Female
+female = (
+    grouped[grouped["sex_id"] == 2]
+    [["age_group_years_start", "age_name", "spend_mean"]]
+    .rename(columns={"spend_mean": "PVD_spend_all_payers"})
+    .sort_values("age_group_years_start")
+)
+
+# Both sexes combined (Male + Female)
+both = (
+    grouped
+    .groupby(["age_group_years_start", "age_name"], as_index=False)["spend_mean"]
+    .sum()
+    .rename(columns={"spend_mean": "NEURO_EPILEPSY_all_payers"})
+    .sort_values("age_group_years_start")
+)
+
+# -----------------------------
+# 5. Save ONE Excel file with 3 sheets
+# -----------------------------
+out_file = output_dir / "NEURO_EPILEPSY_2019_USA_age_all_payers.xlsx"
+
+with pd.ExcelWriter(out_file, engine="xlsxwriter") as writer:
+    both.to_excel(writer, sheet_name="Both", index=False)
+    female.to_excel(writer, sheet_name="Female", index=False)
+    male.to_excel(writer, sheet_name="Male", index=False)
+
+print("Saved:", out_file)
+
+
+# In[22]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# ================================
+# 1. Load your combined file
+# ================================
+input_file = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers\ALL_PAYERS_BY_SEX_ALL_DISEASES.xlsx")
+
+df = pd.read_excel(input_file, sheet_name=None)
+
+# Combine Male / Female / All sheets into one dataframe
+df_all = pd.concat(df.values(), ignore_index=True)
+
+df_all.columns = [c.strip() for c in df_all.columns]
+
+# ================================
+# 2. Keep ONLY Both Sexes
+# ================================
+both_mask = df_all["sex_name"].isin(["All", "Both", "Both sexes"])
+df_both = df_all[both_mask].copy()
+
+# ================================
+# 3. Order Ages
+# ================================
+if "age_id" in df_both.columns:
+    age_order = (df_both.sort_values("age_id")["age_name"]
+                 .drop_duplicates())
+else:
+    age_order = df_both["age_name"].drop_duplicates().sort_values()
+
+# ================================
+# 4. Export: One Sheet Per Age
+# ================================
+output_file = input_file.parent / "BOTH_SEX__ONE_SHEET_PER_AGE.xlsx"
+
+with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
+    for age in age_order:
+        temp = df_both[df_both["age_name"] == age].copy()
+
+        if "cause_name" in temp.columns:
+            temp = temp.sort_values("cause_name")
+
+        # safe Excel sheet name
+        sheet_name = str(age)
+        for bad in [":", "/", "\\", "?", "*", "[", "]"]:
+            sheet_name = sheet_name.replace(bad, "-")
+        sheet_name = sheet_name[:31]
+
+        temp.to_excel(writer, sheet_name=sheet_name, index=False)
+
+print("DONE! Saved to:")
+print(output_file)
+
+
+# In[24]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# ================================
+# 1. PATH TO YOUR FOLDER
+# ================================
+folder = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+# ================================
+# 2. READ ONLY SHEET "PAYER_ALL_PAYERS"
+#    FROM ALL XLSX FILES
+# ================================
+all_data = []
+
+for file in folder.glob("*.xlsx"):
+    try:
+        df = pd.read_excel(file, sheet_name="PAYER_ALL_PAYERS")
+    except ValueError:
+        # file doesn't have that sheet – skip it
+        print(f"Sheet 'PAYER_ALL_PAYERS' not found in {file.name}, skipping")
+        continue
+
+    df.columns = [c.strip() for c in df.columns]  # clean col names
+    df["source_file"] = file.name
+    all_data.append(df)
+
+# Combine all files
+df_all = pd.concat(all_data, ignore_index=True)
+
+# ================================
+# 3. OPTIONAL FILTERS / SORT
+# ================================
+
+# drop rows without sex_name
+if "sex_name" in df_all.columns:
+    df_all = df_all[df_all["sex_name"].notna()]
+
+# sort by sex, age, disease if those columns exist
+sort_cols = [c for c in ["sex_name", "age_id", "age_name", "cause_name"] if c in df_all.columns]
+if sort_cols:
+    df_all = df_all.sort_values(by=sort_cols)
+
+# ================================
+# 4. WRITE NEW EXCEL:
+#    ONE SHEET PER SEX (Male/Female/All)
+#    WITH ALL COST COLUMNS
+# ================================
+output_path = folder / "ALL_PAYERS_BY_SEX_ALL_DISEASES.xlsx"
+
+with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+    for sex in df_all["sex_name"].unique():
+        temp = df_all[df_all["sex_name"] == sex].copy()
+        if sort_cols:
+            temp = temp.sort_values(by=[c for c in ["age_id", "age_name", "cause_name"] if c in temp.columns])
+
+        # safe sheet name
+        if pd.isna(sex):
+            sheet_name = "Unknown_Sex"
+        else:
+            sheet_name = str(sex).replace(" ", "_")[:31]
+
+        # THIS WRITES ALL COLUMNS, INCLUDING ALL spend_* COST COLUMNS
+        temp.to_excel(writer, sheet_name=sheet_name, index=False)
+
+print("DONE! Saved to:", output_path)
+
+
+# In[26]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# -----------------------------
+# 1. Load the "All" sheet
+# -----------------------------
+path = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers\ALL_PAYERS_BY_SEX_ALL_DISEASES.xlsx")
+
+df_all = pd.read_excel(path, sheet_name="All")
+df_all.columns = [c.strip() for c in df_all.columns]
+
+# -----------------------------
+# 2. Split: rows age_id 0 or 1 vs the rest
+# -----------------------------
+mask_0_5 = df_all["age_id"].isin([0, 1])   # 0–<1 and 1–<5
+df_0_1_1_5 = df_all[mask_0_5].copy()
+df_rest   = df_all[~mask_0_5].copy()
+
+# -----------------------------
+# 3. Make a new 0–<5 group
+#    by summing numeric cols
+# -----------------------------
+# set the new age label
+df_0_1_1_5["age_id"] = 0
+df_0_1_1_5["age_name"] = "0 - <5"
+
+# group by cause/payer/sex and new age
+group_cols = ["cause_name", "payer", "sex_name", "age_id", "age_name"]
+df_agg_0_5 = (
+    df_0_1_1_5
+    .groupby(group_cols, as_index=False)
+    .sum(numeric_only=True)     # sums spend_mean, spend_low, spend_upper, etc.
+)
+
+# -----------------------------
+# 4. Combine back and sort
+# -----------------------------
+df_result = pd.concat([df_rest, df_agg_0_5], ignore_index=True)
+
+df_result = df_result.sort_values(["age_id", "cause_name"])
+
+# -----------------------------
+# 5. Save to a NEW Excel file
+# -----------------------------
+out_path = path.with_name("ALL_PAYERS_BY_SEX_ALL_DISEASES_agg0to5_All.xlsx")
+df_result.to_excel(out_path, index=False, sheet_name="All")
+
+print("Done. Saved aggregated file to:")
+print(out_path)
+
+
+# In[27]:
+
+
+import pandas as pd
+from pathlib import Path
+
+path = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers\ALL_PAYERS_BY_SEX_ALL_DISEASES.xlsx")
+
+df = pd.read_excel(path, sheet_name="All")
+
+# ---------------- Normalize columns ----------------
+df.columns = [c.strip() for c in df.columns]
+df["cause_name"] = df["cause_name"].str.strip()
+df["payer"] = df["payer"].str.strip()
+df["sex_name"] = df["sex_name"].str.strip()
+df["age_name"] = df["age_name"].astype(str).str.strip()
+
+# ---------------- Identify 0–<1 + 1–<5 ----------------
+mask = df["age_name"].isin([
+    "0 - <1","0-<1","0 -<1","0- <1",
+    "1 - <5","1-<5","1 -<5","1- <5"
+])
+
+df_0_5 = df[mask].copy()
+df_rest = df[~mask].copy()
+
+# ---------------- Build 0–<5 aggregate ----------------
+df_0_5["age_name"] = "0 - <5"
+df_0_5["age_id"] = 0
+
+group_keys = ["cause_name", "payer", "sex_name", "age_id", "age_name"]
+
+df_agg_0_5 = (
+    df_0_5
+    .groupby(group_keys, as_index=False)
+    .sum(numeric_only=True)
+)
+
+# ---------------- Combine back ----------------
+df_combined = pd.concat([df_rest, df_agg_0_5], ignore_index=True)
+
+# ---------------- REMOVE DUPLICATION ----------------
+# If duplicates exist on the SAME disease + age → SUM their costs
+dedupe_keys = ["cause_name", "payer", "sex_name", "age_name", "age_id"]
+
+df_final = (
+    df_combined
+    .groupby(dedupe_keys, as_index=False)
+    .sum(numeric_only=True)
+)
+
+# ---------------- Sort nicely ----------------
+df_final = df_final.sort_values(["cause_name", "age_id"])
+
+# ---------------- Save ----------------
+output = path.with_name("ALL_PAYERS_BY_SEX_ALL_DISEASES_agg0to5_DEDUP.xlsx")
+df_final.to_excel(output, index=False)
+
+print("DONE →", output)
+
+
+# In[28]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# -----------------------------------
+# 1. Read ALL original payer files
+# -----------------------------------
+folder = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+dfs = []
+
+for file in folder.glob("*.xlsx"):
+    try:
+        df = pd.read_excel(file, sheet_name="PAYER_ALL_PAYERS")
+    except ValueError:
+        # skip files that don't have this sheet
+        continue
+    
+    df.columns = [c.strip() for c in df.columns]
+    df["source_file"] = file.name
+    dfs.append(df)
+
+df_all = pd.concat(dfs, ignore_index=True)
+
+# -----------------------------------
+# 2. Keep BOTH SEXES ONLY (sex_name == "All")
+# -----------------------------------
+df_all["sex_name"] = df_all["sex_name"].astype(str).str.strip()
+df_all = df_all[df_all["sex_name"] == "All"].copy()
+
+# store how many diseases before aggregation
+n_before = df_all["cause_name"].nunique()
+print("Unique diseases before aggregation:", n_before)
+
+# -----------------------------------
+# 3. Normalize age_name and create age_group
+#    (0–<1 and 1–<5 → 0–<5, everything else unchanged)
+# -----------------------------------
+df_all["age_name"] = df_all["age_name"].astype(str).str.strip()
+
+def normalize_age(age):
+    a = age.replace("  ", " ").strip()
+    # handle common variants
+    if (a.startswith("0") and "<1" in a) or (a.startswith("1") and "<5" in a):
+        return "0 - <5"
+    return a
+
+df_all["age_group"] = df_all["age_name"].apply(normalize_age)
+
+# For a stable ordering, build an age order from the original age_id if present
+if "age_id" in df_all.columns:
+    df_all["age_id"] = df_all["age_id"]
+else:
+    df_all["age_id"] = pd.NA  # placeholder
+
+# -----------------------------------
+# 4. Aggregate & remove duplicates
+#    Group by: disease + payer + sex + normalized age
+# -----------------------------------
+group_cols = ["cause_name", "payer", "sex_name", "age_group"]
+
+numeric_cols = df_all.select_dtypes("number").columns.tolist()
+
+df_final = (
+    df_all
+    .groupby(group_cols, as_index=False)[numeric_cols]
+    .sum()
+)
+
+# recalc diseases after aggregation
+n_after = df_final["cause_name"].nunique()
+print("Unique diseases after aggregation:", n_after)
+
+# -----------------------------------
+# 5. Sort and save
+# -----------------------------------
+# if age_id exists, sort by it; otherwise by age_group text
+sort_cols = []
+if "age_id" in df_final.columns:
+    sort_cols.append("age_id")
+sort_cols += ["age_group", "cause_name"]
+
+sort_cols = [c for c in sort_cols if c in df_final.columns]
+
+df_final = df_final.sort_values(sort_cols)
+
+out_path = folder / "ALL_PAYERS_BOTHSEX_agg0to5_dedup_clean.xlsx"
+df_final.to_excel(out_path, index=False, sheet_name="Both_sexes")
+
+print("Saved to:", out_path)
+
+
+# In[30]:
+
+
+import pandas as pd
+from pathlib import Path
+
+folder = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+has_sheet = []
+no_sheet = []
+
+for file in folder.glob("*.xlsx"):
+    try:
+        xls = pd.ExcelFile(file)
+        if "PAYER_ALL_PAYERS" in xls.sheet_names:
+            has_sheet.append(file.name)
+        else:
+            no_sheet.append(file.name)
+    except Exception as e:
+        print(f"Error reading {file.name}: {e}")
+
+print("\n========= FILES WITH PAYER_ALL_PAYERS =========")
+for f in has_sheet:
+    print(f)
+
+print("\n========= FILES WITHOUT PAYER_ALL_PAYERS =========")
+for f in no_sheet:
+    print(f)
+
+print("\nSUMMARY:")
+print("Total Excel files:", len(has_sheet) + len(no_sheet))
+print("With PAYER_ALL_PAYERS:", len(has_sheet))
+print("Without PAYER_ALL_PAYERS:", len(no_sheet))
+
+
+# In[31]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# -----------------------------------
+# 1. Folder with all your payer files
+# -----------------------------------
+folder = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+all_dfs = []
+
+for file in folder.glob("*.xlsx"):
+    try:
+        xls = pd.ExcelFile(file)
+    except Exception as e:
+        print(f"Skipping {file.name} (cannot open): {e}")
+        continue
+
+    if "PAYER_ALL_PAYERS" not in xls.sheet_names:
+        # only use files that have this sheet
+        continue
+
+    df = pd.read_excel(xls, sheet_name="PAYER_ALL_PAYERS")
+    df.columns = [c.strip() for c in df.columns]
+    df["source_file"] = file.name
+    all_dfs.append(df)
+
+# Combine all selected files
+df_all = pd.concat(all_dfs, ignore_index=True)
+
+# -----------------------------------
+# 2. Keep only BOTH SEXES ("All")
+# -----------------------------------
+df_all["sex_name"] = df_all["sex_name"].astype(str).str.strip()
+df_all = df_all[df_all["sex_name"] == "All"].copy()
+
+# -----------------------------------
+# 3. Normalize ages & map 0–1 + 1–5 -> 0–5
+# -----------------------------------
+df_all["age_name"] = df_all["age_name"].astype(str)
+df_all["age_name_clean"] = df_all["age_name"].str.replace("  ", " ").str.strip()
+
+def map_age(a: str) -> str:
+    a = a.replace("  ", " ").strip()
+    # any variant of 0–<1 or 1–<5 -> 0–<5
+    if (a.startswith("0") and "<1" in a) or (a.startswith("1") and "<5" in a):
+        return "0 - <5"
+    return a
+
+df_all["age_group"] = df_all["age_name_clean"].apply(map_age)
+
+# build an age_id for ordering
+if "age_id" in df_all.columns:
+    # for each age_group, use min original age_id
+    age_id_map = (
+        df_all.groupby("age_group")["age_id"]
+              .min()
+              .reset_index()
+              .rename(columns={"age_id": "age_group_id"})
+    )
+    df_all = df_all.merge(age_id_map, on="age_group", how="left")
+else:
+    # if no age_id column, create order from sorted age_group names
+    unique_ages = sorted(df_all["age_group"].unique())
+    age_order = {age: i for i, age in enumerate(unique_ages)}
+    df_all["age_group_id"] = df_all["age_group"].map(age_order)
+
+# -----------------------------------
+# 4. Aggregate & de-duplicate
+# -----------------------------------
+# numeric columns to sum (spend_* etc) – exclude age ids
+numeric_cols = df_all.select_dtypes("number").columns.tolist()
+for c in ["age_id", "age_group_id"]:
+    if c in numeric_cols:
+        numeric_cols.remove(c)
+
+# group keys: all non-numeric columns but using age_group/age_group_id
+group_cols = [c for c in df_all.columns if c not in numeric_cols]
+
+# we don't want old age_name or age_name_clean as separate grouping keys
+for c in ["age_name", "age_name_clean", "age_id"]:
+    if c in group_cols:
+        group_cols.remove(c)
+
+# ensure our age grouping columns are in keys
+for c in ["age_group", "age_group_id"]:
+    if c not in group_cols:
+        group_cols.append(c)
+
+df_grouped = (
+    df_all
+    .groupby(group_cols, as_index=False)[numeric_cols]
+    .sum()
+)
+
+# Rename age_group -> age_name, age_group_id -> age_id for output
+df_grouped = df_grouped.rename(columns={"age_group": "age_name",
+                                       "age_group_id": "age_id"})
+
+# Sort nicely by age then disease
+sort_cols = [c for c in ["age_id", "age_name", "cause_name"] if c in df_grouped.columns]
+df_grouped = df_grouped.sort_values(sort_cols)
+
+print("Number of unique diseases in final file:",
+      df_grouped["cause_name"].nunique())
+
+# -----------------------------------
+# 5. Save ONE Excel file
+# -----------------------------------
+out_path = folder / "ALL_PAYER_ALL_DISEASES_AllSex_agg0to5.xlsx"
+df_grouped.to_excel(out_path, index=False, sheet_name="All")
+
+print("Saved to:", out_path)
+
+
+# In[33]:
+
+
+import pandas as pd
+from pathlib import Path
+
+def unique_causes_all_sheets(excel_path):
+    excel_path = Path(excel_path)
+    xls = pd.ExcelFile(excel_path)
+
+    all_causes = []
+
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(excel_path, sheet_name=sheet)
+
+        # Standardize column names
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        if "cause_name" in df.columns:
+            all_causes.extend(df["cause_name"].dropna().astype(str).str.strip())
+        else:
+            print(f"⚠️ No 'cause_name' in sheet: {sheet}")
+
+    return sorted(set(all_causes))
+
+
+# ------------------------------------------------
+# FILE 1: Prev + YLD
+# ------------------------------------------------
+file1 = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_vs_2023_aboveMedian2019.xlsx"
+unique1 = unique_causes_all_sheets(file1)
+
+print("\n===== UNIQUE CAUSES IN FILE 1 =====")
+for c in unique1:
+    print(c)
+
+pd.DataFrame(unique1, columns=["unique_cause_name"]).to_excel(
+    r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\unique_causes_prev_yld.xlsx",
+    index=False
+)
+
+
+# ------------------------------------------------
+# FILE 2: ALL PAYERS COST
+# ------------------------------------------------
+file2 = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers\ALL_PAYERS_BY_SEX_ALL_DISEASES.xlsx"
+unique2 = unique_causes_all_sheets(file2)
+
+print("\n===== UNIQUE CAUSES IN FILE 2 =====")
+for c in unique2:
+    print(c)
+
+pd.DataFrame(unique2, columns=["unique_cause_name"]).to_excel(
+    r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\unique_causes_cost.xlsx",
+    index=False
+)
+
+print("\nDone. Two Excel files created with unique cause lists.")
+
+
+# In[34]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# -------------------------------
+# 1️⃣ File path
+# -------------------------------
+file_prev = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_vs_2023_aboveMedian2019.xlsx"
+
+# -------------------------------
+# 2️⃣ List of allowed causes
+# -------------------------------
+allowed_causes = [
+"Alzheimer's disease and other dementias",
+"Brain and central nervous system cancer",
+"Chronic kidney disease due to diabetes mellitus type 1",
+"Chronic kidney disease due to diabetes mellitus type 2",
+"Congenital musculoskeletal and limb anomalies",
+"Cyclist road injuries",
+"Diabetes mellitus type 1",
+"Diabetes mellitus type 2",
+"Down syndrome",
+"Drowning",
+"Drug-susceptible tuberculosis",
+"Encephalitis",
+"Environmental heat and cold exposure",
+"Exposure to forces of nature",
+"Falls",
+"Fire, heat, and hot substances",
+"Gout",
+"Hemolytic disease and other neonatal jaundice",
+"Hepatoblastoma",
+"Idiopathic epilepsy",
+"Intracerebral hemorrhage",
+"Ischemic stroke",
+"Low back pain",
+"Lower extremity peripheral arterial disease",
+"Malignant neoplasm of bone and articular cartilage",
+"Meningitis",
+"Motor neuron disease",
+"Motor vehicle road injuries",
+"Motorcyclist road injuries",
+"Multiple sclerosis",
+"Neck pain",
+"Neonatal encephalopathy due to birth asphyxia and trauma",
+"Neonatal preterm birth",
+"Neonatal sepsis and other neonatal infections",
+"Neural tube defects",
+"Neuroblastoma and other peripheral nervous cell tumors",
+"Non-venomous animal contact",
+"Osteoarthritis hand",
+"Osteoarthritis hip",
+"Osteoarthritis knee",
+"Osteoarthritis other",
+"Other chromosomal abnormalities",
+"Other congenital birth defects",
+"Other exposure to mechanical forces",
+"Other musculoskeletal disorders",
+"Other road injuries",
+"Other transport injuries",
+"Other unintentional injuries",
+"Parkinson's disease",
+"Pedestrian road injuries",
+"Physical violence by firearm",
+"Physical violence by other means",
+"Physical violence by sharp object",
+"Poisoning by carbon monoxide",
+"Poisoning by other means",
+"Police conflict and executions",
+"Protein-energy malnutrition",
+"Rheumatoid arthritis",
+"Self-harm by other specified means",
+"Soft tissue and other extraosseous sarcomas",
+"Unintentional firearm injuries",
+"Venomous animal contact",
+"Vitamin A deficiency"
+]
+
+# -------------------------------
+# 3️⃣ Filter ALL sheets
+# -------------------------------
+xls = pd.ExcelFile(file_prev)
+filtered_sheets = {}
+
+for sheet in xls.sheet_names:
+    df = pd.read_excel(file_prev, sheet_name=sheet)
+
+    # standardize column names
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    if "cause_name" in df.columns:
+        f = df[df["cause_name"].isin(allowed_causes)]
+        filtered_sheets[sheet] = f
+    else:
+        print(f"⚠️ No cause_name in: {sheet}")
+
+# -------------------------------
+# 4️⃣ Save output
+# -------------------------------
+output_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_FILTERED_SELECTED_CAUSES.xlsx"
+
+with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+    for sheet, data in filtered_sheets.items():
+        data.to_excel(writer, sheet_name=sheet, index=False)
+
+print("✅ Done! Filtered file created:")
+print(output_path)
+
+
+# In[35]:
+
+
+import pandas as pd
+
+file = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_vs_2023_aboveMedian2019.xlsx"
+
+terms = [
+    "Neonatal preterm birth",
+    "Neonatal encephalopathy due to birth asphyxia and trauma"
+]
+
+xls = pd.ExcelFile(file)
+
+for sheet in xls.sheet_names:
+    df = pd.read_excel(file, sheet_name=sheet)
+
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    if "cause_name" not in df.columns:
+        continue
+    
+    subset = df[df["cause_name"].isin(terms)]
+
+    if len(subset):
+        print(f"\n===== {sheet} =====")
+        print(subset)
+
+
+# In[4]:
+
+
+import pandas as pd
+from pathlib import Path
+
+cost_folder = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+search_terms = [
+    "neonatal",
+    "preterm",
+    "enceph",
+    "birth",
+    "asphyxia"
+]
+
+for f in cost_folder.glob("*.xlsx"):
+    xls = pd.ExcelFile(f)
+
+    # if PAYER_ALL_PAYERS exists, use it, otherwise use first sheet
+    sheet = "PAYER_ALL_PAYERS" if "PAYER_ALL_PAYERS" in xls.sheet_names else xls.sheet_names[0]
+
+    df = pd.read_excel(f, sheet_name=sheet)
+    df.columns = [c.lower() for c in df.columns]
+
+    # choose any text column that might hold condition name
+    text_cols = [c for c in df.columns if "cause" in c or "name" in c or "condition" in c]
+
+    if not text_cols:
+        continue
+
+    found = pd.DataFrame()
+
+    for col in text_cols:
+        mask = False
+        for term in search_terms:
+            mask = mask | df[col].astype(str).str.contains(term, case=False, na=False)
+        found = pd.concat([found, df[mask]])
+
+    if len(found):
+        print(f"\n===== {f.name} =====")
+        print(found[text_cols + [c for c in df.columns if 'spend' in c]].head())
+
+
+# In[7]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# -------------------------
+# 1. Input file paths
+# -------------------------
+base = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers"
+
+files = [
+    Path(base) / "INJ_TRANS_PAYERS_AGE_3rows.xlsx",
+    Path(base) / "INJ_MECH_PAYERS_AGE_3rows.xlsx",
+    Path(base) / "INJ_SUICIDE_PAYERS_AGE_3rows.xlsx",
+]
+
+sheet_name = "PAYER_ALL_PAYERS"
+
+# -------------------------
+# 2. Read and stack all 3
+# -------------------------
+dfs = []
+for f in files:
+    df = pd.read_excel(f, sheet_name=sheet_name)
+    dfs.append(df)
+
+inj_nonfall = pd.concat(dfs, ignore_index=True)
+
+# (optional) keep only needed columns, in case there are extras
+inj_nonfall = inj_nonfall[
+    ["cause_name", "payer", "age_id", "age_name", "sex_name",
+     "spend_mean", "spend_low", "spend_upper"]
+]
+
+# (optional) drop exact duplicate rows
+inj_nonfall = inj_nonfall.drop_duplicates()
+
+# (optional) sort for nicer viewing
+inj_nonfall = inj_nonfall.sort_values(["cause_name", "age_id"]).reset_index(drop=True)
+
+# -------------------------
+# 3. Save as new Excel file
+# -------------------------
+out_path = Path(base) / "INJ_NONFALL_PAYERS_AGE_3rows.xlsx"
+
+with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+    inj_nonfall.to_excel(writer, sheet_name=sheet_name, index=False)
+
+print("Done! Saved:", out_path)
+
+
+# In[1]:
+
+
+import pandas as pd
+from pathlib import Path
+
+# -----------------------------
+# 1. Paths
+# -----------------------------
+input_dir = Path(r"C:\Users\gmash\Downloads")
+output_dir = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+# pattern for your 4 PVD payer files
+pattern = "IHME_USA_HEALTH_CARE_SPENDING_CAUSE_COUNTY_2010_2019_NEURO_EPILEPSY*2019*.CSV"
+
+# -----------------------------
+# 2. Read and concatenate all 4 payers
+# -----------------------------
+all_dfs = []
+
+for f in input_dir.glob(pattern):
+    print("Reading:", f.name)
+    df = pd.read_csv(f)
+
+    # keep only 2019, national, United States
+    df = df[
+        (df["year_id"] == 2019) &
+        (df["geo"] == "national") &
+        (df["location_name"] == "United States")
+    ]
+
+    # keep age, sex, and ALL three spend columns
+    all_dfs.append(
+        df[
+            [
+                "age_group_years_start",
+                "age_name",
+                "sex_id",
+                "sex_name",
+                "spend_mean",
+                "spend_lower",
+                "spend_upper",
+            ]
+        ]
+    )
+
+# combine all payers into one dataframe
+df_all = pd.concat(all_dfs, ignore_index=True)
+
+# -----------------------------
+# 3. Aggregate across ALL payers & ALL TOC
+# -----------------------------
+# group by age and sex; sum spend_mean, spend_lower, spend_upper over payers and toc
+grouped = (
+    df_all
+    .groupby(
+        ["age_group_years_start", "age_name", "sex_id", "sex_name"],
+        as_index=False
+    )
+    .agg(
+        {
+            "spend_mean": "sum",
+            "spend_lower": "sum",
+            "spend_upper": "sum",
+        }
+    )
+)
+
+# -----------------------------
+# 4. Build Male, Female, Both tables
+# -----------------------------
+# Male
+male = (
+    grouped[grouped["sex_id"] == 1]
+    [
+        [
+            "age_group_years_start",
+            "age_name",
+            "spend_mean",
+            "spend_lower",
+            "spend_upper",
+        ]
+    ]
+    .rename(
+        columns={
+            "spend_mean": "NEURO_EPILEPSY_spend_mean_all_payers",
+            "spend_lower": "NEURO_EPILEPSY_spend_lower_all_payers",
+            "spend_upper": "NEURO_EPILEPSY_spend_upper_all_payers",
+        }
+    )
+    .sort_values("age_group_years_start")
+)
+
+# Female
+female = (
+    grouped[grouped["sex_id"] == 2]
+    [
+        [
+            "age_group_years_start",
+            "age_name",
+            "spend_mean",
+            "spend_lower",
+            "spend_upper",
+        ]
+    ]
+    .rename(
+        columns={
+            "spend_mean": "NEURO_EPILEPSY_spend_mean_all_payers",
+            "spend_lower": "NEURO_EPILEPSY_spend_lower_all_payers",
+            "spend_upper": "NEURO_EPILEPSY_spend_upper_all_payers",
+        }
+    )
+    .sort_values("age_group_years_start")
+)
+
+# Both sexes combined (Male + Female)
+both = (
+    grouped
+    .groupby(["age_group_years_start", "age_name"], as_index=False)
+    .agg(
+        {
+            "spend_mean": "sum",
+            "spend_lower": "sum",
+            "spend_upper": "sum",
+        }
+    )
+    .rename(
+        columns={
+            "spend_mean": "NEURO_EPILEPSY_spend_mean_all_payers",
+            "spend_lower": "NEURO_EPILEPSY_spend_lower_all_payers",
+            "spend_upper": "NEURO_EPILEPSY_spend_upper_all_payers",
+        }
+    )
+    .sort_values("age_group_years_start")
+)
+
+# -----------------------------
+# 5. Save ONE Excel file with 3 sheets
+# -----------------------------
+out_file = output_dir / "NEURO_EPILEPSY_2019_USA_age_all_payers_editttttt.xlsx"
+
+with pd.ExcelWriter(out_file, engine="xlsxwriter") as writer:
+    both.to_excel(writer, sheet_name="Both", index=False)
+    female.to_excel(writer, sheet_name="Female", index=False)
+    male.to_excel(writer, sheet_name="Male", index=False)
+
+print("Saved:", out_file)
+
+# Optional: quick look at the outputs
+print("\nHead of BOTH:")
+print(both.head())
+
+print("\nHead of FEMALE:")
+print(female.head())
+
+print("\nHead of MALE:")
+print(male.head())
+
+
+# In[8]:
+
+
+import pandas as pd
+from pathlib import Path
+
+input_dir = Path(r"C:\Users\gmash\Downloads")
+output_dir = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+pattern = "IHME_USA_HEALTH_CARE_SPENDING_CAUSE_COUNTY_2010_2019_NEURO_EPILEPSY*2019*.CSV"
+
+all_dfs = []
+
+for f in input_dir.glob(pattern):
+    print("Reading:", f.name)
+    df = pd.read_csv(f)
+
+    df = df[
+        (df["year_id"] == 2019) &
+        (df["geo"] == "national") &
+        (df["location_name"] == "United States")
+    ]
+
+    # rename age column to age_id
+    df = df.rename(columns={
+        "age_group_years_start": "age_id",
+        "age_group": "age_id"
+    })
+
+    all_dfs.append(
+        df[
+            [
+                "cause_name",
+                "payer",
+                "age_id",
+                "age_name",
+                "sex_name",
+                "spend_mean",
+                "spend_lower",
+                "spend_upper",
+            ]
+        ]
+    )
+
+df_all = pd.concat(all_dfs, ignore_index=True)
+
+# -----------------------------
+# Aggregate across ALL payers
+# -----------------------------
+grouped = (
+    df_all
+    .groupby(["cause_name", "age_id", "age_name", "sex_name"], as_index=False)
+    .agg({
+        "spend_mean": "sum",
+        "spend_lower": "sum",
+        "spend_upper": "sum"
+    })
+)
+
+grouped["payer"] = "All payers"
+
+grouped = grouped[
+    [
+        "cause_name",
+        "payer",
+        "age_id",
+        "age_name",
+        "sex_name",
+        "spend_mean",
+        "spend_lower",
+        "spend_upper",
+    ]
+]
+
+# -----------------------------
+# Male and Female sheets
+# -----------------------------
+male = grouped[grouped["sex_name"] == "Male"].sort_values("age_id")
+female = grouped[grouped["sex_name"] == "Female"].sort_values("age_id")
+
+# -----------------------------
+# Combined = ALL sexes
+# -----------------------------
+allsex = (
+    grouped
+    .groupby(["cause_name", "age_id", "age_name"], as_index=False)[
+        ["spend_mean", "spend_lower", "spend_upper"]
+    ]
+    .sum()
+)
+
+allsex["sex_name"] = "All"
+allsex["payer"] = "All payers"
+
+allsex = allsex[
+    [
+        "cause_name",
+        "payer",
+        "age_id",
+        "age_name",
+        "sex_name",
+        "spend_mean",
+        "spend_lower",
+        "spend_upper",
+    ]
+].sort_values("age_id")
+
+# -----------------------------
+# Save Output
+# -----------------------------
+out_file = output_dir / "NEURO_EPILEPSY_2019_USA_age_all_payers_LAST_EDIT.xlsx"
+
+with pd.ExcelWriter(out_file, engine="xlsxwriter") as writer:
+    allsex.to_excel(writer, sheet_name="PAYER_ALL_PAYERS", index=False)
+    female.to_excel(writer, sheet_name="Female", index=False)
+    male.to_excel(writer, sheet_name="Male", index=False)
+
+print("Saved:", out_file)
+
+
+# In[16]:
+
+
+import pandas as pd
+from pathlib import Path
+
+input_dir = Path(r"C:\Users\gmash\Downloads")
+output_dir = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+pattern = "IHME_USA_HEALTH_CARE_SPENDING_CAUSE_COUNTY_2010_2019_NUTRITION*2019*.CSV"
+
+all_dfs = []
+
+for f in input_dir.glob(pattern):
+    print("Reading:", f.name)
+    df = pd.read_csv(f)
+
+    df = df[
+        (df["year_id"] == 2019) &
+        (df["geo"] == "national") &
+        (df["location_name"] == "United States")
+    ]
+
+    # rename age column to age_id
+    df = df.rename(columns={
+        "age_group_years_start": "age_id",
+        "age_group": "age_id"
+    })
+
+    all_dfs.append(
+        df[
+            [
+                "cause_name",
+                "payer",
+                "age_id",
+                "age_name",
+                "sex_name",
+                "spend_mean",
+                "spend_lower",
+                "spend_upper",
+            ]
+        ]
+    )
+
+df_all = pd.concat(all_dfs, ignore_index=True)
+
+# -----------------------------
+# Aggregate across ALL payers
+# -----------------------------
+grouped = (
+    df_all
+    .groupby(["cause_name", "age_id", "age_name", "sex_name"], as_index=False)
+    .agg({
+        "spend_mean": "sum",
+        "spend_lower": "sum",
+        "spend_upper": "sum"
+    })
+)
+
+grouped["payer"] = "All payers"
+
+grouped = grouped[
+    [
+        "cause_name",
+        "payer",
+        "age_id",
+        "age_name",
+        "sex_name",
+        "spend_mean",
+        "spend_lower",
+        "spend_upper",
+    ]
+]
+
+# -----------------------------
+# Male and Female sheets
+# -----------------------------
+male = grouped[grouped["sex_name"] == "Male"].sort_values("age_id")
+female = grouped[grouped["sex_name"] == "Female"].sort_values("age_id")
+
+# -----------------------------
+# Combined = ALL sexes
+# -----------------------------
+allsex = (
+    grouped
+    .groupby(["cause_name", "age_id", "age_name"], as_index=False)[
+        ["spend_mean", "spend_lower", "spend_upper"]
+    ]
+    .sum()
+)
+
+allsex["sex_name"] = "All"
+allsex["payer"] = "All payers"
+
+allsex = allsex[
+    [
+        "cause_name",
+        "payer",
+        "age_id",
+        "age_name",
+        "sex_name",
+        "spend_mean",
+        "spend_lower",
+        "spend_upper",
+    ]
+].sort_values("age_id")
+
+# -----------------------------
+# Save Output
+# -----------------------------
+out_file = output_dir / "NUTITION_2019_USA_age_all_payers.xlsx"
+
+with pd.ExcelWriter(out_file, engine="xlsxwriter") as writer:
+    allsex.to_excel(writer, sheet_name="PAYER_ALL_PAYERS", index=False)
+    female.to_excel(writer, sheet_name="Female", index=False)
+    male.to_excel(writer, sheet_name="Male", index=False)
+
+print("Saved:", out_file)
+
+
+# In[18]:
+
+
+import pandas as pd
+from pathlib import Path
+
+folder = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+# mapping: anything that is 0–1 or 1–5 -> "0-5"
+AGE_REMAP = {
+    "0-1": "0-5",
+    "0 to 1": "0-5",
+    "0 to 1 years": "0-5",
+    "1-5": "0-5",
+    "1 to 5": "0-5",
+    "1 to 5 years": "0-5",
+}
+
+for path in folder.glob("*.xlsx"):
+    print(f"Processing: {path.name}")
+    xls = pd.ExcelFile(path)
+
+    new_sheets = {}
+
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(path, sheet_name=sheet)
+
+        # only transform sheets that have the needed columns
+        needed = {"age_name", "sex_name", "spend_mean", "spend_lower", "spend_upper"}
+        if not needed.issubset(df.columns):
+            # keep sheet as-is
+            new_sheets[sheet] = df
+            continue
+
+        # ---------- 1) remap 0–1 and 1–5 into 0–5 ----------
+        df["age_name_new"] = df["age_name"].replace(AGE_REMAP)
+
+        # ---------- 2) group by age_name (and other id columns) ----------
+        group_cols = ["age_name_new", "sex_name"]
+        if "cause_name" in df.columns:
+            group_cols.insert(0, "cause_name")
+        if "payer" in df.columns:
+            group_cols.insert(1, "payer")  # after cause_name
+
+        agg_cols = ["spend_mean", "spend_lower", "spend_upper"]
+
+        df_agg = (
+            df.groupby(group_cols, as_index=False)[agg_cols]
+              .sum()
+        )
+
+        # rename age_name_new back to age_name
+        df_agg = df_agg.rename(columns={"age_name_new": "age_name"})
+
+        # ---------- 3) drop age_id if present ----------
+        if "age_id" in df_agg.columns:
+            df_agg = df_agg.drop(columns=["age_id"])
+
+        new_sheets[sheet] = df_agg
+
+    # ---------- 4) save to a NEW file ----------
+    new_path = path.with_name(path.stem + "_0to5.xlsx")
+    with pd.ExcelWriter(new_path, engine="xlsxwriter") as writer:
+        for sheet, df_out in new_sheets.items():
+            df_out.to_excel(writer, sheet_name=sheet, index=False)
+
+    print(f"  -> saved {new_path.name}")
+
+
+# In[19]:
+
+
+import pandas as pd
+from pathlib import Path
+
+folder = Path(r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\payers")
+
+# Map original age_name strings -> new combined age_name
+AGE_REMAP = {
+    "0 - <1": "0-5",
+    "1 - <5": "0-5",
+    # if you ever have these variants you can keep them too:
+    "0-1": "0-5",
+    "1-5": "0-5",
+    "0 to 1": "0-5",
+    "1 to 5": "0-5",
+}
+
+for path in folder.glob("*.xlsx"):
+    print(f"Processing: {path.name}")
+    xls = pd.ExcelFile(path)
+    new_sheets = {}
+
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(path, sheet_name=sheet)
+
+        # we only touch sheets that have the spend columns + age_name + sex_name
+        needed = {"age_name", "sex_name", "spend_mean", "spend_lower", "spend_upper"}
+        if not needed.issubset(df.columns):
+            new_sheets[sheet] = df
+            continue
+
+        # 1) remap 0-<1 and 1-<5 to "0-5"
+        df["age_name_new"] = df["age_name"].replace(AGE_REMAP)
+
+        # 2) choose grouping columns
+        group_cols = ["age_name_new", "sex_name"]
+        if "cause_name" in df.columns:
+            group_cols.insert(0, "cause_name")
+        if "payer" in df.columns:
+            group_cols.insert(1, "payer")
+
+        # 3) aggregate spending
+        agg_cols = ["spend_mean", "spend_lower", "spend_upper"]
+        df_agg = df.groupby(group_cols, as_index=False)[agg_cols].sum()
+
+        # 4) clean up column names
+        df_agg = df_agg.rename(columns={"age_name_new": "age_name"})
+        if "age_id" in df_agg.columns:
+            df_agg = df_agg.drop(columns=["age_id"])
+
+        new_sheets[sheet] = df_agg
+
+    # 5) save to new file
+    new_path = path.with_name(path.stem + "_0to5.xlsx")
+    with pd.ExcelWriter(new_path, engine="xlsxwriter") as writer:
+        for sheet, df_out in new_sheets.items():
+            df_out.to_excel(writer, sheet_name=sheet, index=False)
+
+    print(f"  -> saved {new_path.name}")
+
+
+# In[2]:
+
+
+import pandas as pd
+
+file_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_FILTERED_SELECTED_CAUSES.xlsx"
+
+# Read all sheets
+sheets = pd.read_excel(file_path, sheet_name=None)
+
+# Collect cause_name from each sheet
+all_causes = []
+
+for name, df in sheets.items():
+    if "cause_name" in df.columns:
+        all_causes.append(df["cause_name"])
+
+# Combine and get unique values
+unique_causes = pd.concat(all_causes).dropna().unique()
+
+print("Total unique causes:", len(unique_causes))
+for c in unique_causes:
+    print(c)
+
+
+# In[3]:
+
+
+import pandas as pd
+
+file_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_FILTERED_SELECTED_CAUSES.xlsx"
+output_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_WITH_NONFALL_GROUP.xlsx"
+
+non_fall_injury_list = [
+"Environmental heat and cold exposure",
+"Exposure to forces of nature",
+"Fire, heat, and hot substances",
+"Motor vehicle road injuries",
+"Motorcyclist road injuries",
+"Non-venomous animal contact",
+"Other exposure to mechanical forces",
+"Other road injuries",
+"Other transport injuries",
+"Other unintentional injuries",
+"Pedestrian road injuries",
+"Physical violence by firearm",
+"Physical violence by other means",
+"Physical violence by sharp object",
+"Poisoning by carbon monoxide",
+"Poisoning by other means",
+"Police conflict and executions",
+"Unintentional firearm injuries",
+"Self-harm by other specified means",
+"Drowning",
+"Cyclist road injuries",
+"Venomous animal contact"
+]
+
+sheets = pd.read_excel(file_path, sheet_name=None)
+
+writer = pd.ExcelWriter(output_path, engine="openpyxl")
+
+for sheet_name, df in sheets.items():
+
+    if "cause_name" not in df.columns:
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+        continue
+    
+    # Split into injury rows and rest
+    nonfall_df = df[df["cause_name"].isin(non_fall_injury_list)]
+    remaining_df = df[~df["cause_name"].isin(non_fall_injury_list)]
+
+    if not nonfall_df.empty:
+
+        new_row = {
+            "location_name": nonfall_df.iloc[0]["location_name"],
+            "sex_name": nonfall_df.iloc[0]["sex_name"],
+            "age_name": nonfall_df.iloc[0]["age_name"],
+            "cause_id": 999999,  # your placeholder
+            "cause_name": "Non-fall injuries",
+            "prevalence_2019": nonfall_df["prevalence_2019"].sum(),
+            "prevalence_2023": nonfall_df["prevalence_2023"].sum(),
+            "yld_2019": nonfall_df["yld_2019"].sum(),
+            "yld_2023": nonfall_df["yld_2023"].sum()
+        }
+
+        combined_df = pd.concat([remaining_df, pd.DataFrame([new_row])],
+                                ignore_index=True)
+    else:
+        combined_df = df
+
+    combined_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+writer.close()
+
+print("DONE — New file created!")
+
+
+# In[4]:
+
+
+import pandas as pd
+
+# ---- paths ----
+file_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_FILTERED_SELECTED_CAUSES.xlsx"
+output_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_WITH_GROUPS.xlsx"
+
+# ---- group definitions ----
+non_fall_injury_list = [
+    "Environmental heat and cold exposure",
+    "Exposure to forces of nature",
+    "Fire, heat, and hot substances",
+    "Motor vehicle road injuries",
+    "Motorcyclist road injuries",
+    "Non-venomous animal contact",
+    "Other exposure to mechanical forces",
+    "Other road injuries",
+    "Other transport injuries",
+    "Other unintentional injuries",
+    "Pedestrian road injuries",
+    "Physical violence by firearm",
+    "Physical violence by other means",
+    "Physical violence by sharp object",
+    "Poisoning by carbon monoxide",
+    "Poisoning by other means",
+    "Police conflict and executions",
+    "Unintentional firearm injuries",
+    "Self-harm by other specified means",
+    "Drowning",
+    "Cyclist road injuries",
+    "Venomous animal contact"
+]
+
+stroke_list = [
+    "Intracerebral hemorrhage",
+    "Ischemic stroke"
+]
+
+# helper to collapse a list of causes into one new row
+def collapse_group(df, cause_list, new_cause_name, new_cause_id):
+    if "cause_name" not in df.columns:
+        return df
+
+    group_df = df[df["cause_name"].isin(cause_list)]
+    remaining_df = df[~df["cause_name"].isin(cause_list)]
+
+    if group_df.empty:
+        return df  # nothing to change
+
+    # build new aggregated row
+    new_row = {
+        "location_name": group_df.iloc[0]["location_name"],
+        "sex_name": group_df.iloc[0]["sex_name"],
+        "age_name": group_df.iloc[0]["age_name"],
+        "cause_id": new_cause_id,
+        "cause_name": new_cause_name,
+        "prevalence_2019": group_df["prevalence_2019"].sum(),
+        "prevalence_2023": group_df["prevalence_2023"].sum(),
+        "yld_2019": group_df["yld_2019"].sum(),
+        "yld_2023": group_df["yld_2023"].sum()
+    }
+
+    new_df = pd.concat(
+        [remaining_df, pd.DataFrame([new_row])],
+        ignore_index=True
+    )
+    return new_df
+
+# ---- process all sheets ----
+sheets = pd.read_excel(file_path, sheet_name=None)
+writer = pd.ExcelWriter(output_path, engine="openpyxl")
+
+for sheet_name, df in sheets.items():
+    # first collapse non-fall injuries
+    df2 = collapse_group(df, non_fall_injury_list,
+                         new_cause_name="Non-fall injuries",
+                         new_cause_id=999001)
+
+    # then collapse stroke subtypes
+    df3 = collapse_group(df2, stroke_list,
+                         new_cause_name="Stroke",
+                         new_cause_id=999002)
+
+    df3.to_excel(writer, sheet_name=sheet_name, index=False)
+
+writer.close()
+
+print("Done! File saved as:", output_path)
+
+
+# In[6]:
+
+
+import pandas as pd
+
+# ---- paths ----
+file_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_FILTERED_SELECTED_CAUSES.xlsx"
+output_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_WITH_GROUPS.xlsx"
+
+# ---- group definitions ----
+non_fall_injury_list = [
+    "Environmental heat and cold exposure",
+    "Exposure to forces of nature",
+    "Fire, heat, and hot substances",
+    "Motor vehicle road injuries",
+    "Motorcyclist road injuries",
+    "Non-venomous animal contact",
+    "Other exposure to mechanical forces",
+    "Other road injuries",
+    "Other transport injuries",
+    "Other unintentional injuries",
+    "Pedestrian road injuries",
+    "Physical violence by firearm",
+    "Physical violence by other means",
+    "Physical violence by sharp object",
+    "Poisoning by carbon monoxide",
+    "Poisoning by other means",
+    "Police conflict and executions",
+    "Unintentional firearm injuries",
+    "Self-harm by other specified means",
+    "Drowning",
+    "Cyclist road injuries",
+    "Venomous animal contact"
+]
+
+stroke_list = [
+    "Intracerebral hemorrhage",
+    "Ischemic stroke"
+]
+
+osteo_list = [
+    "Osteoarthritis of hip",
+    "Osteoarthritis of knee",
+    "Osteoarthritis of hand",
+    "Other osteoarthritis"
+]
+
+# ---- helper to collapse any group of causes into one row ----
+def collapse_group(df, cause_list, new_cause_name, new_cause_id):
+    if "cause_name" not in df.columns:
+        return df
+
+    group_df = df[df["cause_name"].isin(cause_list)]
+    remaining_df = df[~df["cause_name"].isin(cause_list)]
+
+    if group_df.empty:
+        return df  # nothing to change
+
+    new_row = {
+        "location_name": group_df.iloc[0]["location_name"],
+        "sex_name": group_df.iloc[0]["sex_name"],
+        "age_name": group_df.iloc[0]["age_name"],
+        "cause_id": new_cause_id,
+        "cause_name": new_cause_name,
+        "prevalence_2019": group_df["prevalence_2019"].sum(),
+        "prevalence_2023": group_df["prevalence_2023"].sum(),
+        "yld_2019": group_df["yld_2019"].sum(),
+        "yld_2023": group_df["yld_2023"].sum()
+    }
+
+    new_df = pd.concat([remaining_df, pd.DataFrame([new_row])],
+                       ignore_index=True)
+    return new_df
+
+# ---- process all sheets ----
+sheets = pd.read_excel(file_path, sheet_name=None)
+writer = pd.ExcelWriter(output_path, engine="openpyxl")
+
+for sheet_name, df in sheets.items():
+    df1 = collapse_group(df, non_fall_injury_list,
+                         new_cause_name="Non-fall injuries",
+                         new_cause_id=999001)
+
+    df2 = collapse_group(df1, stroke_list,
+                         new_cause_name="Stroke",
+                         new_cause_id=999002)
+
+    df3 = collapse_group(df2, osteo_list,
+                         new_cause_name="Osteoarthritis",
+                         new_cause_id=999003)
+
+    df3.to_excel(writer, sheet_name=sheet_name, index=False)
+
+writer.close()
+
+print("Done! File with grouped causes saved as:", output_path)
+
+
+# In[7]:
+
+
+import pandas as pd
+
+# ---- paths ----
+file_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_FILTERED_SELECTED_CAUSES.xlsx"
+output_path = r"C:\Users\gmash\OneDrive - Cleveland State University\Desktop\epidemiology2\Prev_YLD_2019_2023_WITH_GROUPS.xlsx"
+
+# ---- group definitions ----
+non_fall_injury_list = [
+    "Environmental heat and cold exposure",
+    "Exposure to forces of nature",
+    "Fire, heat, and hot substances",
+    "Motor vehicle road injuries",
+    "Motorcyclist road injuries",
+    "Non-venomous animal contact",
+    "Other exposure to mechanical forces",
+    "Other road injuries",
+    "Other transport injuries",
+    "Other unintentional injuries",
+    "Pedestrian road injuries",
+    "Physical violence by firearm",
+    "Physical violence by other means",
+    "Physical violence by sharp object",
+    "Poisoning by carbon monoxide",
+    "Poisoning by other means",
+    "Police conflict and executions",
+    "Unintentional firearm injuries",
+    "Self-harm by other specified means",
+    "Drowning",
+    "Cyclist road injuries",
+    "Venomous animal contact"
+]
+
+stroke_list = [
+    "Intracerebral hemorrhage",
+    "Ischemic stroke"
+]
+
+osteo_list = [
+    "Osteoarthritis of hip",
+    "Osteoarthritis of knee",
+    "Osteoarthritis of hand",
+    "Other osteoarthritis"
+]
+
+# ---- helper to collapse any group of causes into one row ----
+def collapse_group(df, cause_list, new_cause_name, new_cause_id):
+    if "cause_name" not in df.columns:
+        return df
+
+    group_df = df[df["cause_name"].isin(cause_list)]
+    remaining_df = df[~df["cause_name"].isin(cause_list)]
+
+    if group_df.empty:
+        return df  # nothing to change
+
+    new_row = {
+        "location_name": group_df.iloc[0]["location_name"],
+        "sex_name": group_df.iloc[0]["sex_name"],
+        "age_name": group_df.iloc[0]["age_name"],
+        "cause_id": new_cause_id,
+        "cause_name": new_cause_name,
+        "prevalence_2019": group_df["prevalence_2019"].sum(),
+        "prevalence_2023": group_df["prevalence_2023"].sum(),
+        "yld_2019": group_df["yld_2019"].sum(),
+        "yld_2023": group_df["yld_2023"].sum()
+    }
+
+    new_df = pd.concat([remaining_df, pd.DataFrame([new_row])],
+                       ignore_index=True)
+    return new_df
+
+# ---- process all sheets ----
+sheets = pd.read_excel(file_path, sheet_name=None)
+writer = pd.ExcelWriter(output_path, engine="openpyxl")
+
+for sheet_name, df in sheets.items():
+    df1 = collapse_group(df, non_fall_injury_list,
+                         new_cause_name="Non-fall injuries",
+                         new_cause_id=999001)
+
+    df2 = collapse_group(df1, stroke_list,
+                         new_cause_name="Stroke",
+                         new_cause_id=999002)
+
+    df3 = collapse_group(df2, osteo_list,
+                         new_cause_name="Osteoarthritis",
+                         new_cause_id=999003)
+
+    df3.to_excel(writer, sheet_name=sheet_name, index=False)
+
+writer.close()
+
+print("Done! File with grouped causes saved as:", output_path)
+
+
+# In[ ]:
+
+
+
